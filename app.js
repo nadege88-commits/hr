@@ -480,7 +480,7 @@ async function saveFile(name, text){
   const a = h('a',{href:URL.createObjectURL(new Blob([text],{type:'text/csv'})),download:name}); document.body.append(a); a.click(); a.remove();
 }
 function copyText(text){
-  const fallback = () => sheet('Copy the export', h('p',{class:'small muted'},'Select everything in the box and copy it.'), h('textarea',{id:'csv-out',readonly:true,style:'min-height:220px;font-size:12px',value:text}));
+  const fallback = () => sheet('Copy the export', h('p',{class:'small muted'},'Select everything in the box and copy it.'), h('textarea',{id:'csv-out',readonly:true,style:'min-height:220px;font-size:16px',value:text}));
   if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(()=>toast('Copied'), fallback); else fallback();
 }
 /* where people clock in: a quiet, folded admin view; nothing is blocked and nobody is alerted */
@@ -779,6 +779,8 @@ if (DEMO){
     if (ev==='PASSWORD_RECOVERY') setTimeout(newPasswordScreen,0);
     else if (ev==='SIGNED_IN' && !S.ready) setTimeout(start,0);
   });
+  // The screen is laid out for phones, so stop accidental pinch-zoom (iPhone ignores the viewport setting for pinches).
+  document.addEventListener('gesturestart', e => e.preventDefault());
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(()=>{});
   addEventListener('hashchange', async()=>{ if (!S.ready || location.hash.length<2) return; closeSheet(); try { await loadAll(); } catch {} fromHash(); render(); });
   document.addEventListener('visibilitychange',()=>{ if (!document.hidden && S.ready) refresh(); });

@@ -28,7 +28,7 @@
 }
 
 *{box-sizing:border-box}
-html{background:var(--bg)}
+html{background:var(--bg);touch-action:manipulation}   /* no double-tap zoom */
 body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 var(--body);padding-inline:16px;padding-block:12px 104px;-webkit-tap-highlight-color:transparent;-webkit-text-size-adjust:100%}
 [hidden]{display:none!important}
 button{font:inherit;color:inherit;background:none;border:0;cursor:pointer;padding:0;text-align:inherit}
