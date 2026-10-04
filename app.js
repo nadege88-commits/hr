@@ -27,6 +27,7 @@ const svg = d => '<svg viewBox="0 0 24 24" aria-hidden="true">'+d+'</svg>';
 const I = {
   eye: svg('<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>'),
   eyeOff: svg('<path d="M10.6 5.1A10 10 0 0 1 12 5c6.5 0 10 7 10 7a17 17 0 0 1-2.6 3.4M6.6 6.6C3.7 8.4 2 12 2 12s3.5 7 10 7a9.6 9.6 0 0 0 5.4-1.6M9.9 9.9a3 3 0 0 0 4.2 4.2M3 3l18 18"/>'),
+  refresh: svg('<path d="M20 12a8 8 0 1 1-2.3-5.6"/><path d="M20 4v4.5h-4.5"/>'),
   clock: svg('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>'),
   hours: svg('<path d="M4 6h16M4 12h16M4 18h10"/>'),
   team: svg('<circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.700 6 6"/><path d="M16 5.200a3.200 3.200 0 0 1 0 5.600M18 14.500c1.800.9 3 2.900 3 5.500"/>'),
@@ -309,15 +310,52 @@ async function loadAll(){
     }
   }
 }
+// Never redraw under an open sheet or someone typing: the refresh waits and runs as soon as they are done.
+let refreshT, refreshing = false, stale = false;
+const busy = () => !!document.querySelector('.scrim') || /^(INPUT|TEXTAREA|SELECT)$/.test((document.activeElement||{}).tagName||'');
+function refreshSoon(ms=400){ clearTimeout(refreshT); refreshT = setTimeout(refresh, ms); }
 async function refresh(){
-  if (document.querySelector('.scrim') || /^(INPUT|TEXTAREA|SELECT)$/.test((document.activeElement||{}).tagName||'')) return;   // never redraw under someone typing
+  if (refreshing){ stale = true; return; }
+  if (busy()){ stale = true; refreshSoon(2000); return; }
+  refreshing = true; stale = false;
   try { await loadAll(); render(); } catch {}
+  refreshing = false; if (stale) refreshSoon();
+}
+// Live updates: the database tells the app when a clock, time off request or message changes (only rows this person may see).
+let live = null;
+function listen(){
+  live?.unsubscribe();
+  live = sb.channel('hr');
+  for (const t of ['hr_shifts','hr_leave','hr_inbox','hr_people']) live.on('postgres_changes',{event:'*',schema:'public',table:t},()=>refreshSoon());
+  live.subscribe();
+}
+// Pull down at the top of the screen to refresh (the installed app has no browser refresh).
+function pullToRefresh(){
+  let y0 = null, dy = 0, ind = null;
+  const drop = () => { ind?.remove(); ind = null; };
+  addEventListener('touchstart', e=>{ dy = 0; y0 = S.ready && !busy() && scrollY<=0 && e.touches.length===1? e.touches[0].clientY : null; }, {passive:true});
+  addEventListener('touchmove', e=>{
+    if (y0===null) return;
+    dy = e.touches[0].clientY - y0;
+    if (dy<=8 || scrollY>0){ drop(); return; }
+    if (!ind){ ind = h('div',{class:'ptr','aria-hidden':'true',html:I.refresh}); document.body.append(ind); }
+    const d = Math.min(dy, 140);
+    ind.style.transform = `translate(-50%, ${d*0.45}px) rotate(${d*2.4}deg)`; ind.classList.toggle('ready', dy>80);
+  }, {passive:true});
+  addEventListener('touchend', async()=>{
+    if (y0===null) return; y0 = null;
+    if (!ind) return;
+    if (dy<=80){ drop(); return; }
+    const el = ind; ind = null; el.classList.add('spin');
+    try { await loadAll(); render(); } catch { toast('No connection'); }
+    el.remove();
+  });
 }
 
 /* ---------- small UI pieces ---------- */
 let toastT;
 function toast(t){ document.querySelector('.toast')?.remove(); const el = h('div',{class:'toast',role:'status'},t); document.body.append(el); clearTimeout(toastT); toastT = setTimeout(()=>el.remove(), 2600); }
-function closeSheet(){ document.querySelector('.scrim')?.remove(); }
+function closeSheet(){ document.querySelector('.scrim')?.remove(); if (stale) refreshSoon(); }
 function sheet(title, ...body){
   closeSheet();
   const sc = h('div',{class:'scrim',onclick:e=>{ if (e.target===sc) closeSheet(); }},
@@ -866,7 +904,7 @@ async function start(){
   try { await loadAll(); } catch { plainScreen('No connection', 'Open the app again when you have signal.'); return; }
   const p = db.people.find(x=>x.id===S.me);
   if (!p || p.active===false){ plainScreen('Almost there', 'This account ('+S.me+') is not on the team yet. Ask your manager to check the spelling of your email, then tap Try again.', true); return; }
-  S.ready = true; fromHash(); render(); checkPush();
+  S.ready = true; fromHash(); render(); checkPush(); listen();
 }
 
 if (DEMO){
@@ -894,7 +932,9 @@ if (DEMO){
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(()=>{});
   addEventListener('hashchange', async()=>{ if (!S.ready || location.hash.length<2) return; closeSheet(); try { await loadAll(); } catch {} fromHash(); render(); });
   document.addEventListener('visibilitychange',()=>{ if (!document.hidden && S.ready) refresh(); });
-  setInterval(()=>{ if (!document.hidden && S.ready) refresh(); }, 60000);
+  setInterval(()=>{ if (!document.hidden && S.ready) refresh(); }, 30000);   // a safety net in case a live update is missed
+  addEventListener('online', ()=>{ if (S.ready) refresh(); });
+  pullToRefresh();
   start();
 }
 })();
