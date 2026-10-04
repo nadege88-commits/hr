@@ -46,6 +46,7 @@ const LOGOS = new Set(['v1','v2','v3','v4','v5','v6','v7','v8','xmusti0bzrmndx']
 const logoSrc = id => ART ? 'data:image/png;base64,'+window.NP_LOGOS[id] : 'logos/'+id+'.png';
 const vLogo = (id, cls) => LOGOS.has(id) ? h('img',{class:'vlogo'+(cls? ' '+cls : ''),src:logoSrc(id),alt:vName(id)}) : h('b',{class:'vtext'},vName(id));
 const ROLES = {employee:'Employee', manager:'Manager', admin:'Admin'};
+const OPS = {maintenance:'Maintenance', manager:'Manager', admin:'Admin', owner:'Owner'};      // roles in the Operations app
 const LEAVE = {holiday:'Holiday', sick:'Sick leave', unpaid:'Unpaid leave', other:'Other'};
 
 /* ---------- dates ---------- */
@@ -126,7 +127,7 @@ function seed(){
 let db = null;
 if (DEMO){ db = store.load(); if (!db || !db.venues || (!db.touched && db.seededOn !== iso(Date.now()))) { db = seed(); store.save(db); } }
 
-const S = {ready:false, me:'p4', tab:null, seg:{team:'now', leave:'mine'}, week:weekStart(Date.now()), open:null, pickVenue:null,
+const S = {ready:false, push:false, opsOwner:false, me:'p4', tab:null, seg:{team:'now', leave:'mine'}, week:weekStart(Date.now()), open:null, pickVenue:null,
            exp:{range:'thisWeek', venue:'all', format:'shifts'}};
 if (DEMO) try { const u = localStorage.getItem(KEY+'-me'); if (u && db.people.some(p=>p.id===u)) S.me = u; } catch {}
 
@@ -209,9 +210,8 @@ function markRead(list){
   if (DEMO) store.save(db); else sb.from('hr_inbox').update({read_at:new Date().toISOString()}).in('id',ids).then(()=>{});
 }
 const savePerson = (p, v) => run(()=>{ if (p) Object.assign(p, v); else db.people.push({id:uid(), ...v}); },
-  ()=> p ? sb.from('hr_people').update({name:v.name, job:v.job, role:v.role, venue_ids:v.venues}).eq('email',p.id)
-         : sb.from('hr_people').upsert({email:v.email, name:v.name, job:v.job, role:v.role, venue_ids:v.venues, active:true}), 'Saved');
-const removePerson = p => run(()=>{ db.people = db.people.filter(x=>x.id!==p.id); }, ()=>sb.from('hr_people').update({active:false}).eq('email',p.id), 'Removed');
+  rpc('hr_save_person',{p_email:v.email, p_name:v.name, p_job:v.job, p_hr_role:v.role==='none'? null : v.role, p_ops_role:v.ops==='none'? null : v.ops, p_venues:v.venues}), 'Saved');
+const removePerson = p => run(()=>{ db.people = db.people.filter(x=>x.id!==p.id); }, ()=>Promise.resolve({}), 'Removed');      // demo only
 
 /* ---------- loading from the database ---------- */
 async function loadAll(){
@@ -232,6 +232,18 @@ async function loadAll(){
     inbox: ib.data.map(m=>({id:m.id, to:m.recipient, kind:m.kind, text:m.body, tab:m.tab, at:T(m.created_at), read:!!m.read_at})),
     push: {}
   };
+  // Admins see one list for both apps: add each person's Operations role, and the people who only use Operations.
+  const mine = db.people.find(p=>p.id===S.me); S.opsOwner = false;
+  if (mine && mine.active!==false && mine.role==='admin'){
+    const dir = await sb.rpc('hr_directory'); if (dir.error) throw dir.error;
+    const known = new Set(db.venues.map(v=>v.id));
+    for (const d of dir.data){
+      const p = db.people.find(x=>x.id===d.email);
+      if (p) p.ops = d.ops_role || null;
+      else db.people.push({id:d.email, name:d.name||d.email, job:d.job||'', role:'employee', venues:(d.venue_ids||[]).filter(v=>known.has(v)), active:false, ops:d.ops_role});
+      if (d.email===S.me) S.opsOwner = d.ops_role==='owner';
+    }
+  }
 }
 async function refresh(){
   if (document.querySelector('.scrim') || /^(INPUT|TEXTAREA|SELECT)$/.test((document.activeElement||{}).tagName||'')) return;   // never redraw under someone typing
@@ -399,7 +411,7 @@ function viewLeave(){
 function viewInbox(){
   const list = db.inbox.filter(m=>m.to===S.me).sort((a,b)=>b.at-a.at), on = !!db.push[S.me];
   return [h('div',{class:'sec-h'}, h('h1',{},'Inbox'), list.some(m=>!m.read)? h('button',{onclick:()=>{ markRead(list); render(); }},'Mark all read') : null),
-    !DEMO? null : h('div',{class:'card'}, h('div',{class:'switch'},
+    !DEMO? pushCard() : h('div',{class:'card'}, h('div',{class:'switch'},
       h('div',{class:'main'}, h('b',{},'Notifications on this phone'), h('small',{}, on? 'On. You get a notification for each new message here.' : 'Off. Messages still arrive here in the inbox.')),
       h('button',{class:'tog',role:'switch','aria-checked':String(on),'aria-label':'Notifications on this phone',onclick:()=>{ db.push[S.me] = !on; store.save(db); render(); }})),
       h('p',{class:'small muted'},'Demo: in the real app this switch turns on phone notifications, the same way as in Operations.')),
@@ -450,22 +462,29 @@ function copyText(text){
   if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(()=>toast('Copied'), fallback); else fallback();
 }
 function personSheet(p){
+  const self = p && p.id===S.me, hasHr = !p || p.active!==false;
   const email = h('input',{id:'pp-email',type:'email',autocomplete:'off',placeholder:'name@example.com'});
   const name = h('input',{id:'pp-name',value:p? p.name : '',placeholder:'Full name'}), job = h('input',{id:'pp-job',value:p? p.job : '',placeholder:'Job, for example Bartender'});
   const venues = pills(V().map(v=>[v.id,v.name]), p? [...p.venues] : []);
-  const role = pills(Object.entries(ROLES), p? p.role : 'employee'), err = h('div',{class:'err',hidden:true});
+  const role = pills((DEMO? [] : [['none','No access']]).concat(Object.entries(ROLES)), p? (hasHr? p.role : 'none') : 'employee');
+  const ops = pills([['none','No access']].concat(Object.entries(OPS)), (p && p.ops) || 'none'), err = h('div',{class:'err',hidden:true});
   sheet(p? 'Edit person' : 'Add person',
     DEMO? null : p? h('p',{class:'small muted'},p.id) : field('Email they sign in with',email),
-    field('Name',name), field('Job',job), field('Role',role), field('Works at',venues), err,
+    field('Name',name), field('Job',job),
+    self? null : field(DEMO? 'Role' : 'This app (Team)',role),
+    DEMO? null : S.opsOwner && !self? field('Operations app',ops)
+      : h('p',{class:'small muted'}, 'Operations app: '+(p && p.ops? OPS[p.ops] : 'no access')+(self? '' : '. Only an Operations owner can change this.')),
+    field('Works at',venues), err,
     h('p',{class:'small muted'},'Employees clock in and ask for time off. Managers also correct hours and approve time off for their venues. Admins see everything.'
-      +(DEMO || p? '' : ' They sign in with this email: the same password as Operations if they have one, otherwise they tap Create account.')),
+      +(DEMO || p? '' : ' One login works in both apps: their Operations password if they have one, otherwise they tap Create account.')),
     h('div',{class:'btns'},
-      p && p.id!==S.me? armed('Remove', ()=>{ closeSheet(); removePerson(p); }) : null,
+      DEMO && p && !self? armed('Remove', ()=>{ closeSheet(); removePerson(p); }) : null,
       h('button',{class:'btn primary',onclick:()=>{
-        const em = email.value.trim().toLowerCase();
+        const em = p? p.id : email.value.trim().toLowerCase();
         if (!DEMO && !p && !/^\S+@\S+\.\S+$/.test(em)){ err.textContent = 'Add their email address.'; err.hidden = false; return; }
         if (!name.value.trim()){ err.textContent = 'Add a name.'; err.hidden = false; return; }
-        const v = {email:em, name:name.value.trim(), job:job.value.trim(), role: p && p.id===S.me? p.role : role.value(), venues:venues.value()};
+        const v = {email:em, name:name.value.trim(), job:job.value.trim(), role: self? p.role : role.value(), ops: DEMO? undefined : ops.value(), venues:venues.value()};
+        if (!DEMO && v.role==='none' && v.ops==='none' && !p){ err.textContent = 'Give them access to at least one app.'; err.hidden = false; return; }
         closeSheet(); savePerson(p, v); }},'Save')));
 }
 function viewAdmin(){
@@ -488,10 +507,10 @@ function viewAdmin(){
       h('div',{class:'card'}, h('div',{class:'hd'}, h('div',{class:'main'}, h('b',{},'Not connected yet')), h('span',{class:'tag pending'},'Manual')),
         h('p',{class:'q'},'For now, download the hours above and import the file into the tips dashboard. Once we know what the dashboard accepts, this can send the hours across on its own.'))),
     h('div',{class:'block'}, h('div',{class:'sec-h'}, h('h2',{},'People'), h('button',{onclick:()=>personSheet(null)},'Add person')),
-      h('div',{class:'list'}, active().sort((a,b)=>Object.keys(ROLES).indexOf(b.role)-Object.keys(ROLES).indexOf(a.role) || a.name.localeCompare(b.name)).map(p=>
+      h('div',{class:'list'}, db.people.filter(p=>p.active!==false || p.ops).sort((a,b)=>Object.keys(ROLES).indexOf(b.role)-Object.keys(ROLES).indexOf(a.role) || a.name.localeCompare(b.name)).map(p=>
         h('button',{class:'row',onclick:()=>personSheet(p)}, avatar(p),
-          h('span',{class:'main'}, h('b',{},p.name), h('small',{}, (p.job? p.job+' · ' : '')+(p.role==='admin'? 'All venues' : p.venues.map(vName).join(', ')||'No venue'))),
-          h('span',{class:'tag'},ROLES[p.role]))))),
+          h('span',{class:'main'}, h('b',{},p.name), h('small',{}, (p.job? p.job+' · ' : '')+(p.role==='admin' && p.active!==false? 'All venues' : p.venues.map(vName).join(', ')||'No venue'))),
+          h('span',{class:'end'}, h('span',{class:'tag'}, p.active===false? 'Not in Team' : ROLES[p.role]), p.ops? h('span',{class:'tag'},'Operations · '+OPS[p.ops]) : null))))),
     DEMO? h('button',{class:'btn',onclick:()=>{ db = seed(); store.save(db); S.me = 'p1'; toast('Demo data reset'); render(); }},'Reset the demo data') : null];
 }
 function shiftSheet(s, pid){
@@ -533,7 +552,7 @@ function accountSheet(){
   const p = me();
   sheet('Your account', h('div',{class:'card'}, h('div',{class:'hd'}, avatar(p), h('div',{class:'main'}, h('b',{},p.name), h('small',{},S.me)), h('span',{class:'tag'},ROLES[p.role])),
       p.role==='admin'? null : h('div',{class:'q'}, p.venues.length? 'Works at '+p.venues.map(vName).join(', ') : 'No venue yet')),
-    h('button',{class:'btn danger',onclick:async()=>{ closeSheet(); S.ready = false; await sb.auth.signOut(); authScreen('signin'); }},'Sign out'));
+    h('button',{class:'btn danger',onclick:async()=>{ closeSheet(); S.ready = false; if (S.push) await pushOff().catch(()=>{}); S.push = false; await sb.auth.signOut(); authScreen('signin'); }},'Sign out'));
 }
 
 /* ---------- shell ---------- */
@@ -568,6 +587,55 @@ setInterval(()=>{
 }, 1000);
 
 { let th = 'dark'; try { th = localStorage.getItem(KEY+'-theme') || th; } catch {} document.documentElement.setAttribute('data-theme', th); }   // dark unless this phone chose light
+
+/* ---------- phone notifications (real app only): time off requests and decisions ---------- */
+const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+const installed = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone===true;
+const pushOK = () => !DEMO && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window && !!CFG.vapidPublicKey;
+const keyBytes = k => Uint8Array.from(atob((k+'='.repeat((4-k.length%4)%4)).replace(/-/g,'+').replace(/_/g,'/')), c=>c.charCodeAt(0));
+async function registerPhone(sub){
+  const j = sub.toJSON();
+  const {error} = await sb.rpc('hr_save_push',{p_endpoint:j.endpoint, p_p256dh:j.keys.p256dh, p_auth:j.keys.auth, p_user_agent:navigator.userAgent});
+  if (error) throw error;
+}
+async function pushOn(){
+  if (await Notification.requestPermission()!=='granted'){ toast('Notifications are blocked for this app in the phone settings.'); return false; }
+  const reg = await navigator.serviceWorker.ready;
+  const sub = await reg.pushManager.getSubscription() || await reg.pushManager.subscribe({userVisibleOnly:true, applicationServerKey:keyBytes(CFG.vapidPublicKey)});
+  await registerPhone(sub); return true;
+}
+async function pushOff(){
+  const reg = await navigator.serviceWorker.getRegistration(), sub = reg && await reg.pushManager.getSubscription();
+  if (sub){ await sb.rpc('hr_remove_push',{p_endpoint:sub.endpoint}); await sub.unsubscribe(); }
+}
+async function checkPush(){                                     // on opening: if this phone is switched on, make sure the database still knows it
+  if (!pushOK()) return;
+  try {
+    const reg = await navigator.serviceWorker.ready, sub = Notification.permission==='granted'? await reg.pushManager.getSubscription() : null;
+    S.push = !!sub; if (sub) await registerPhone(sub);
+    if (S.ready && S.tab==='inbox') render();
+  } catch {}
+}
+async function togglePush(){
+  try { if (S.push){ await pushOff(); S.push = false; } else { S.push = await pushOn(); if (S.push) toast('Notifications are on'); } }
+  catch (e){ toast('Could not change notifications. '+((e && e.message) || 'Try again.')); }
+  render();
+}
+function pushCard(){
+  if (!pushOK()) return null;
+  const blocked = isIOS && !installed();
+  const what = me().role==='employee'? 'when your time off is approved or rejected' : 'when someone asks for time off, and when yours is approved or rejected';
+  return h('div',{class:'card'}, h('div',{class:'switch'},
+    h('div',{class:'main'}, h('b',{},'Notifications on this phone'),
+      h('small',{}, blocked? 'On iPhone, first add this app to your home screen (Share, then Add to Home Screen) and open it from there.' : (S.push? 'On. You get one ' : 'Off. Switch on to get one ')+what+'.')),
+    h('button',{class:'tog',role:'switch','aria-checked':String(!!S.push),'aria-label':'Notifications on this phone',disabled:blocked,onclick:togglePush})));
+}
+function fromHash(){                                            // a tapped notification opens the app at #leave
+  const k = location.hash.slice(1); if (!k) return;
+  history.replaceState(null,'',location.pathname+location.search);
+  if (!tabs().some(t=>t[0]===k)) return;
+  S.tab = k; if (k==='leave' && me().role!=='employee') S.seg.leave = toApprove().length? 'approve' : 'mine';
+}
 
 /* ---------- sign-in (real app only) ---------- */
 const root = () => document.getElementById('app');
@@ -623,7 +691,7 @@ async function start(){
   try { await loadAll(); } catch { plainScreen('No connection', 'Open the app again when you have signal.'); return; }
   const p = db.people.find(x=>x.id===S.me);
   if (!p || p.active===false){ plainScreen('Almost there', 'This account ('+S.me+') is not on the team yet. Ask your manager to add this email, then try again.', true); return; }
-  S.ready = true; render();
+  S.ready = true; fromHash(); render(); checkPush();
 }
 
 if (DEMO){
@@ -640,6 +708,8 @@ if (DEMO){
     if (ev==='PASSWORD_RECOVERY') setTimeout(newPasswordScreen,0);
     else if (ev==='SIGNED_IN' && !S.ready) setTimeout(start,0);
   });
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(()=>{});
+  addEventListener('hashchange', async()=>{ if (!S.ready || location.hash.length<2) return; closeSheet(); try { await loadAll(); } catch {} fromHash(); render(); });
   document.addEventListener('visibilitychange',()=>{ if (!document.hidden && S.ready) refresh(); });
   setInterval(()=>{ if (!document.hidden && S.ready) refresh(); }, 60000);
   start();
