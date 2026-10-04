@@ -194,3 +194,10 @@ tr:last-child td{border-bottom:0}
 .fold>*+*{margin-top:10px}
 /* admin: the phone's location at a clock, opens Google Maps */
 .maplink{color:var(--accent);font-weight:700;font-size:13px;white-space:nowrap;text-decoration:none;flex:none}
+/* password fields: eye button to show or hide what is typed */
+.pwbox{position:relative;flex:1;min-width:0;display:flex}
+.pwbox input{padding-right:48px;width:100%}
+.pwbox .eye{position:absolute;right:2px;top:50%;transform:translateY(-50%);width:44px;height:44px;display:flex;align-items:center;justify-content:center;color:var(--muted);background:none;border:0}
+.pwbox .eye svg{width:20px;height:20px}
+.pwrow{display:flex;gap:8px;align-items:center}
+.auth{width:100%}

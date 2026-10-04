@@ -25,6 +25,8 @@ function h(tag, attrs, ...kids){
 }
 const svg = d => '<svg viewBox="0 0 24 24" aria-hidden="true">'+d+'</svg>';
 const I = {
+  eye: svg('<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>'),
+  eyeOff: svg('<path d="M10.6 5.1A10 10 0 0 1 12 5c6.5 0 10 7 10 7a17 17 0 0 1-2.6 3.4M6.6 6.6C3.7 8.4 2 12 2 12s3.5 7 10 7a9.6 9.6 0 0 0 5.4-1.6M9.9 9.9a3 3 0 0 0 4.2 4.2M3 3l18 18"/>'),
   clock: svg('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>'),
   hours: svg('<path d="M4 6h16M4 12h16M4 18h10"/>'),
   team: svg('<circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.700 6 6"/><path d="M16 5.200a3.200 3.200 0 0 1 0 5.600M18 14.500c1.800.9 3 2.900 3 5.500"/>'),
@@ -232,7 +234,25 @@ function markRead(list){
 const savePerson = (p, v) => run(()=>{
     const on = v.role!=='none', row = {name:v.name, job:v.job, venues:v.venues, role: on? v.role : (p? p.role : 'employee'), active:on};
     if (p) Object.assign(p, row); else db.people.push({id:uid(), ...row});
-  }, rpc('hr_save_person',{p_email:v.email, p_name:v.name, p_job:v.job, p_hr_role:v.role==='none'? null : v.role, p_ops_role:v.ops==='none'? null : v.ops, p_venues:v.venues}), 'Saved');
+  }, async ()=>{
+    if (p && v.email!==p.id){                                   // a fixed typo: move the email everywhere first, login included
+      const r = await sb.rpc('change_member_email',{p_old:p.id, p_new:v.email}); if (r.error) return r;
+    }
+    return sb.rpc('hr_save_person',{p_email:v.email, p_name:v.name, p_job:v.job, p_hr_role:v.role==='none'? null : v.role, p_ops_role:v.ops==='none'? null : v.ops, p_venues:v.venues});
+  }, 'Saved');
+// The invite: a message with a link that opens Set up account with their email filled in, in the app they can use.
+const OPS_URL = 'https://nadege88-commits.github.io/operations/';
+async function sendInvite(p){
+  const team = p.active!==false, base = team? location.origin+location.pathname : OPS_URL;
+  const link = base + '?setup=' + encodeURIComponent(p.id), first = (p.name||'').trim().split(/\s+/)[0];
+  const text = 'Hi'+(first? ' '+first : '')+', you are on the Northpoint '+(team? 'Team app' : 'Operations app')+'. Open this link to set up your account and choose a password:\n'+link;
+  if (navigator.share){ try { await navigator.share({text}); return; } catch (e){ if (e && e.name==='AbortError') return; } }
+  try { await navigator.clipboard.writeText(text); toast('Invite copied. Paste it in WhatsApp.'); }
+  catch {   // no share sheet and no clipboard: show the message to copy by hand
+    sheet('Invite', h('p',{class:'small muted'},'Copy this and send it to them:'), h('textarea',{id:'invite-text',readonly:true,style:'min-height:140px',value:text}));
+    const box = document.getElementById('invite-text'); if (box){ box.focus(); box.select(); }
+  }
+}
 const disablePerson = p => run(()=>{ p.active = false; }, rpc('hr_disable_person',{p_email:p.id}), 'Disabled');
 const deletePerson = p => run(()=>{
     db.people = db.people.filter(x=>x.id!==p.id); db.shifts = db.shifts.filter(x=>x.person!==p.id); db.leave = db.leave.filter(x=>x.person!==p.id);
@@ -278,6 +298,8 @@ async function loadAll(){
       else db.people.push({id:d.email, name:d.name||d.email, job:d.job||'', role:'employee', venues:(d.venue_ids||[]).filter(v=>known.has(v)), active:false, ops:d.ops_role});
       if (d.email===S.me) S.opsOwner = d.ops_role==='owner';
     }
+    const st = await sb.rpc('team_setup');                       // who has set up their account, for "Not set up yet"
+    if (!st.error) S.setup = Object.fromEntries(st.data.map(r=>[r.email, r.set_up]));
     // Which network each clock-in and clock-out came from (admins only; the database gives it to nobody else).
     const [nt, lb] = await Promise.all([pages(()=>sb.from('hr_shift_net').select('*').gte('at',since).order('at').order('shift_id')), sb.from('hr_networks').select('net,label')]);
     if (!nt.error && !lb.error){
@@ -551,22 +573,27 @@ function networkFold(){
       h('span',{class:'main'}, h('b',{},x.p.name), h('small',{class:'num'}, x.off.length? x.off.length+' of '+x.n+' from other networks' : 'All '+x.n+' from named networks')),
       h('span',{html:I.right.replace('<svg','<svg class="chev"')}))))] : null);
 }
-function personSheet(p){
+function personSheet(p, justAdded){
   const self = p && p.id===S.me, hasHr = !p || p.active!==false;
-  const email = h('input',{id:'pp-email',type:'email',autocomplete:'off',placeholder:'name@example.com'});
+  const email = h('input',{id:'pp-email',type:'email',autocomplete:'off',autocapitalize:'off',spellcheck:'false',placeholder:'name@example.com',value:p? p.id : null});
+  const lockedEmail = !p || self || p.role==='admin' && p.active!==false || p.ops==='owner';
+  const notSetUp = !DEMO && p && (justAdded || (S.setup && S.setup[p.id]===false));
   const name = h('input',{id:'pp-name',value:p? p.name : '',placeholder:'Full name'}), job = h('input',{id:'pp-job',value:p? p.job : '',placeholder:'Job, for example Bartender'});
   const venues = pills(V().map(v=>[v.id,v.name]), p? [...p.venues] : []);
   const role = pills([['none','No access']].concat(Object.entries(ROLES)), p? (hasHr? p.role : 'none') : 'employee');
   const ops = pills([['none','No access']].concat(Object.entries(OPS)), (p && p.ops) || 'none'), err = h('div',{class:'err',hidden:true});
   sheet(p? 'Edit person' : 'Add person',
-    DEMO? null : p? h('p',{class:'small muted'},p.id) : field('Email they sign in with',email),
+    notSetUp? h('div',{class:'card'}, h('b',{}, justAdded? 'Saved. Now send them the invite:' : 'Not set up yet'),
+      h('button',{class:'btn primary',onclick:()=>sendInvite(p)},'Send invite'),
+      h('p',{class:'small muted',style:'margin:0'},'Opens WhatsApp or Messages with a link. They tap it, choose a password, done.')) : null,
+    DEMO? null : !p? field('Email they sign in with',email) : lockedEmail? h('p',{class:'small muted'},p.id) : field('Email',email),
     field('Name',name), field('Job',job),
     self? null : field(DEMO? 'Role' : 'This app (Team)',role),
     DEMO? null : S.opsOwner && !self? field('Operations app',ops)
       : h('p',{class:'small muted'}, 'Operations app: '+(p && p.ops? OPS[p.ops] : 'no access')+(self? '' : '. Only an Operations owner can change this.')),
     field('Works at',venues), err,
     h('p',{class:'small muted'},'Employees clock in and ask for time off. Managers also correct hours and approve time off for their venues. Admins see everything.'
-      +(DEMO || p? '' : ' One login works in both apps: their Operations password if they have one, otherwise they tap Create account.')),
+      +(DEMO || p? '' : ' One login works in both apps. After saving, send them the invite.')),
     p && !self? h('details',{class:'fold'}, h('summary',{},'Disable or delete'),
       hasHr || p.ops? h('p',{class:'small muted'},'Disable: '+p.name.split(' ')[0]+' can no longer open '+(DEMO || !p.ops? 'the app' : S.opsOwner? 'either app' : 'this app (Operations access stays; only an Operations owner can remove it)')+'. Hours and time off are kept, and you can switch them back on later.') : null,
       h('p',{class:'small muted'},'Delete: removes the person and their login for good, with all their recorded hours and time off requests. This cannot be undone.'),
@@ -575,17 +602,19 @@ function personSheet(p){
         armed('Delete for good', ()=>{ closeSheet(); deletePerson(p); }))) : null,
     h('div',{class:'btns'},
       h('button',{class:'btn primary',onclick:()=>{
-        const em = p? p.id : email.value.trim().toLowerCase();
-        if (!DEMO && !p && !/^\S+@\S+\.\S+$/.test(em)){ err.textContent = 'Add their email address.'; err.hidden = false; return; }
+        const em = !p || !lockedEmail? email.value.trim().toLowerCase() : p.id;
+        if (!DEMO && (!p || !lockedEmail) && !/^\S+@\S+\.\S+$/.test(em)){ err.textContent = 'Add their email address.'; err.hidden = false; return; }
         if (!name.value.trim()){ err.textContent = 'Add a name.'; err.hidden = false; return; }
         const v = {email:em, name:name.value.trim(), job:job.value.trim(), role: self? p.role : role.value(), ops: DEMO? undefined : ops.value(), venues:venues.value()};
         if (!DEMO && v.role==='none' && v.ops==='none' && !p){ err.textContent = 'Give them access to at least one app.'; err.hidden = false; return; }
-        closeSheet(); savePerson(p, v); }},'Save')));
+        closeSheet();
+        savePerson(p, v).then(()=>{ if (!p && !DEMO){ const np = db.people.find(x=>x.id===v.email); if (np) personSheet(np, true); } }); }},'Save')));
 }
 const byRole = (a,b) => Object.keys(ROLES).indexOf(b.role)-Object.keys(ROLES).indexOf(a.role) || a.name.localeCompare(b.name);
 const personRow = p => h('button',{class:'row',onclick:()=>personSheet(p)}, avatar(p),
   h('span',{class:'main'}, h('b',{},p.name), h('small',{}, (p.job? p.job+' · ' : '')+(p.role==='admin' && p.active!==false? 'All venues' : p.venues.map(vName).join(', ')||'No venue'))),
-  h('span',{class:'end'}, h('span',{class:'tag'}, p.active===false? (p.ops? 'Not in Team' : 'Disabled') : ROLES[p.role]), p.ops? h('span',{class:'tag'},'Operations · '+OPS[p.ops]) : null));
+  h('span',{class:'end'}, h('span',{class:'tag'}, p.active===false? (p.ops? 'Not in Team' : 'Disabled') : ROLES[p.role]), p.ops? h('span',{class:'tag'},'Operations · '+OPS[p.ops]) : null,
+    S.setup && S.setup[p.id]===false && (p.active!==false || p.ops)? h('span',{class:'tag pending'},'Not set up yet') : null));
 function viewAdmin(){
   const off = db.people.filter(p=>p.active===false && !p.ops);
   const x = exportData(), E = S.exp;
@@ -651,8 +680,19 @@ function whoSheet(){
 
 function accountSheet(){
   const p = me();
+  const np = h('input',{id:'change-password',type:'password',autocomplete:'new-password',placeholder:'New password'});
+  const savePw = async e => {
+    if (np.value.length < 6){ toast('The new password needs at least 6 characters'); return; }
+    const btn = e.currentTarget; btn.disabled = true;
+    const {error} = await sb.auth.updateUser({password:np.value});
+    btn.disabled = false;
+    if (error) toast(/different/i.test(error.message)? 'That is already your password' : error.message);
+    else { np.value = ''; np.type = 'password'; toast('Password changed'); }
+  };
   sheet('Your account', h('div',{class:'card'}, h('div',{class:'hd'}, avatar(p), h('div',{class:'main'}, h('b',{},p.name), h('small',{},S.me)), h('span',{class:'tag'},ROLES[p.role])),
       p.role==='admin'? null : h('div',{class:'q'}, p.venues.length? 'Works at '+p.venues.map(vName).join(', ') : 'No venue yet')),
+    DEMO? null : field('Change password', h('div',{class:'pwrow'}, pwField(np), h('button',{class:'btn',onclick:savePw},'Save'))),
+    h('p',{class:'small muted'},'One password for both Northpoint apps.'),
     h('button',{class:'btn danger',onclick:async()=>{ closeSheet(); S.ready = false; if (S.push) await pushOff().catch(()=>{}); S.push = false; await sb.auth.signOut(); authScreen('signin'); }},'Sign out'));
 }
 
@@ -740,12 +780,22 @@ function fromHash(){                                            // a tapped noti
 
 /* ---------- sign-in (real app only) ---------- */
 const root = () => document.getElementById('app');
-function authScreen(mode, note){
+// A password input with an eye button that shows or hides what is typed.
+function pwField(input, shown){
+  const eye = h('button',{type:'button',class:'eye'});
+  const set = on => { input.type = on? 'text' : 'password'; eye.innerHTML = on? I.eyeOff : I.eye;
+    eye.setAttribute('aria-label', on? 'Hide password' : 'Show password'); eye.setAttribute('aria-pressed', String(on)); };
+  eye.onclick = () => { set(input.type==='password'); input.focus(); };
+  input.setAttribute('autocapitalize','off'); input.setAttribute('autocorrect','off'); input.setAttribute('spellcheck','false');
+  set(!!shown);
+  return h('div',{class:'pwbox'}, input, eye);
+}
+function authScreen(mode, note, presetEmail){
   S.ready = false;
-  const email = h('input',{id:'email',type:'email',autocomplete:'email',placeholder:'Email','aria-label':'Email'});
+  const email = h('input',{id:'email',type:'email',autocomplete:'email',placeholder:'Email','aria-label':'Email',value:presetEmail||null});
   const pass = h('input',{id:'password',type:'password',autocomplete:mode==='signup'? 'new-password' : 'current-password',placeholder:'Password','aria-label':'Password'});
   const msg = h('p',{class:'small muted',style:'min-height:1.4em'}, note||'');
-  const label = mode==='signup'? 'Create account' : mode==='reset'? 'Send reset link' : 'Sign in';
+  const label = mode==='signup'? 'Set up account' : mode==='reset'? 'Send reset link' : 'Sign in';
   const submit = h('button',{type:'submit',class:'btn primary big'},label);
   const busy = on => { submit.disabled = on; submit.textContent = on? 'One moment…' : label; };
   const here = location.origin+location.pathname;
@@ -758,27 +808,39 @@ function authScreen(mode, note){
       if (!error && !r.data.session){ busy(false); msg.textContent = 'Check your email to confirm, then sign in here.'; return; }
     } else {
       ({error} = await sb.auth.resetPasswordForEmail(em, {redirectTo:here}));
-      if (!error){ busy(false); msg.textContent = 'Reset link sent. Open it on this phone.'; return; }
+      if (!error){ busy(false); msg.textContent = 'Link sent. Open the newest email on this phone and tap the link once.'; return; }
     }
     busy(false);
-    if (error) msg.textContent = /invalid login/i.test(error.message)? 'Wrong email or password.' : error.message;
+    if (error) msg.textContent = /invalid login/i.test(error.message)? 'Wrong email or password.'
+      : /already registered|already been registered|already exists/i.test(error.message)? 'This email is already set up. Sign in, or tap Forgot password.'
+      : /rate limit|too many|security purposes/i.test(error.message)? 'Too many emails sent. Use the newest email, or try again in an hour.' : error.message;
   }},
     h('img',{class:'brand',style:'height:64px;align-self:center',src:logoSrc('v8'),alt:'Northpoint'}),
-    h('h1',{style:'text-align:center'},'Team'),
-    h('p',{class:'small muted',style:'text-align:center'}, mode==='signin'? 'Same email and password as Operations, if you have one.' : mode==='signup'? 'Use the email your manager added for you.' : 'We send a link to set a new password.'),
-    email, mode==='reset'? null : pass, submit, msg,
+    h('h1',{style:'text-align:center'}, mode==='signup'? 'Set up account' : 'Team'),
+    h('p',{class:'small muted',style:'text-align:center'}, mode==='signin'? 'Same email and password as Operations, if you have one.' : mode==='signup'? (presetEmail? 'Choose a password. You will use it to sign in to both Northpoint apps.' : 'Use the email your manager added for you, and choose a password.') : 'We send a link to set a new password.'),
+    email, mode==='reset'? null : pwField(pass, mode==='signup'), submit, msg,
     h('div',{class:'btns',style:'justify-content:center'},
-      mode!=='signin'? h('button',{type:'button',class:'link',onclick:()=>authScreen('signin')},'Sign in') : h('button',{type:'button',class:'link',onclick:()=>authScreen('signup')},'Create account'),
+      mode!=='signin'? h('button',{type:'button',class:'link',onclick:()=>authScreen('signin')},'Sign in') : h('button',{type:'button',class:'link',onclick:()=>authScreen('signup')},'Set up account'),
       mode!=='reset'? h('button',{type:'button',class:'link',style:'color:var(--muted)',onclick:()=>authScreen('reset')},'Forgot password') : null)));
 }
 function newPasswordScreen(){
   S.ready = false;
   const pass = h('input',{id:'new-password',type:'password',autocomplete:'new-password',placeholder:'New password','aria-label':'New password'}), msg = h('p',{class:'err'});
+  const save = h('button',{type:'submit',class:'btn primary big'},'Save');
   root().replaceChildren(h('form',{class:'auth',onsubmit:async e=>{
-    e.preventDefault();
+    e.preventDefault(); msg.textContent = '';
+    if (pass.value.length < 6){ msg.textContent = 'At least 6 characters.'; return; }
+    save.disabled = true;
     const {error} = await sb.auth.updateUser({password:pass.value});
-    if (error) msg.textContent = error.message; else { toast('Password changed'); start(); }
-  }}, h('h1',{},'New password'), pass, h('button',{type:'submit',class:'btn primary big'},'Save'), msg));
+    save.disabled = false;
+    if (error){ msg.textContent = /different/i.test(error.message)? 'Pick a password you have not used here before.' : error.message; return; }
+    S.recovering = false;
+    // On iPhone the email link opens Safari, not the home-screen app, so say where to sign in.
+    root().replaceChildren(h('div',{class:'auth'}, h('h1',{},'Password saved'),
+      h('p',{class:'small muted'},'Open Team from your home screen and sign in with the new password.'),
+      h('button',{class:'btn primary big',onclick:()=>start()},'Continue here')));
+  }}, h('h1',{},'New password'), pwField(pass), save, msg));
+  pass.focus();
 }
 function plainScreen(title, text, again){
   S.ready = false;
@@ -787,11 +849,23 @@ function plainScreen(title, text, again){
 }
 async function start(){
   const {data:{session}} = await sb.auth.getSession();
+  if (S.recovering && session){ newPasswordScreen(); return; }   // opened from a reset email: new password first
+  S.recovering = false;
+  if (S.linkError){                                              // an old or already used reset link
+    S.linkError = false;
+    if (!session){ authScreen('reset', 'That link has expired (each link works once). Send a new one:'); return; }
+    setTimeout(()=>toast('That reset link has expired. Each link works once.'), 800);
+  }
+  if (S.setupEmail){                                             // an invite link
+    const em = S.setupEmail; S.setupEmail = null;
+    if (!session){ authScreen('signup', null, em); return; }
+    if ((session.user.email||'').toLowerCase()!==em) setTimeout(()=>toast('That invite is for '+em+'. Sign out first to set it up on this phone.'), 800);
+  }
   if (!session){ authScreen('signin'); return; }
   S.me = (session.user.email||'').toLowerCase();
   try { await loadAll(); } catch { plainScreen('No connection', 'Open the app again when you have signal.'); return; }
   const p = db.people.find(x=>x.id===S.me);
-  if (!p || p.active===false){ plainScreen('Almost there', 'This account ('+S.me+') is not on the team yet. Ask your manager to add this email, then try again.', true); return; }
+  if (!p || p.active===false){ plainScreen('Almost there', 'This account ('+S.me+') is not on the team yet. Ask your manager to check the spelling of your email, then tap Try again.', true); return; }
   S.ready = true; fromHash(); render(); checkPush();
 }
 
@@ -804,10 +878,16 @@ if (DEMO){
   if (q.get('theme')) document.documentElement.setAttribute('data-theme', q.get('theme'));
   S.ready = true; render();
 } else {
+  // Read the email or invite link before Supabase clears it: a reset link opens the new-password screen, not the app;
+  // a failed link (#error=…) is noted and cleared; ?setup=<email> opens Set up account with that email filled in.
+  const setup = new URLSearchParams(location.search).get('setup');
+  if (setup){ S.setupEmail = setup.trim().toLowerCase(); history.replaceState(null, '', location.pathname + location.hash); }
+  if (/(^#|&)type=recovery(&|$)/.test(location.hash)) S.recovering = true;
+  else if (/(^#|&)error(_code)?=/.test(location.hash)){ S.linkError = true; history.replaceState(null, '', location.pathname + location.search); }
   sb = window.supabase.createClient(CFG.supabaseUrl, CFG.supabaseAnonKey, {auth:{persistSession:true, autoRefreshToken:true, detectSessionInUrl:true}});
   sb.auth.onAuthStateChange(ev=>{                                // deferred: awaiting Supabase calls inside this callback can stall the client
-    if (ev==='PASSWORD_RECOVERY') setTimeout(newPasswordScreen,0);
-    else if (ev==='SIGNED_IN' && !S.ready) setTimeout(start,0);
+    if (ev==='PASSWORD_RECOVERY'){ S.recovering = true; setTimeout(newPasswordScreen,0); }
+    else if (ev==='SIGNED_IN' && !S.ready && !S.recovering) setTimeout(start,0);
   });
   // The screen is laid out for phones, so stop accidental pinch-zoom (iPhone ignores the viewport setting for pinches).
   document.addEventListener('gesturestart', e => e.preventDefault());
