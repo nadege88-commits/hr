@@ -219,13 +219,23 @@ const deletePerson = p => run(()=>{
   }, rpc('hr_delete_person',{p_email:p.id}), 'Deleted');
 
 /* ---------- loading from the database ---------- */
+// The database hands out at most 1000 rows per request, so long lists are fetched page by page.
+async function pages(build){
+  let data = [];
+  for (let from = 0; ; from += 1000){
+    const r = await build().range(from, from+999);
+    if (r.error) return r;
+    data = data.concat(r.data);
+    if (r.data.length < 1000) return {data};
+  }
+}
 async function loadAll(){
   const since = new Date(Date.now()-120*DAY).toISOString(), T = t => t? new Date(t).getTime() : null, hide = CFG.hiddenVenues || [];
   const [pe, ve, sh, le, ib] = await Promise.all([
-    sb.from('hr_people').select('*'),
+    pages(()=>sb.from('hr_people').select('*').order('email')),
     sb.from('venues').select('id,name,ord').order('ord'),
-    sb.from('hr_shifts').select('*').is('deleted_at',null).gte('clock_in',since),
-    sb.from('hr_leave').select('*').neq('status','cancelled'),
+    pages(()=>sb.from('hr_shifts').select('*').is('deleted_at',null).gte('clock_in',since).order('clock_in').order('id')),
+    pages(()=>sb.from('hr_leave').select('*').neq('status','cancelled').order('created_at').order('id')),
     sb.from('hr_inbox').select('*').eq('recipient',S.me).order('id',{ascending:false}).limit(100)]);
   const bad = [pe,ve,sh,le,ib].find(r=>r.error); if (bad) throw bad.error;
   db = {
