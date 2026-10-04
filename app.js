@@ -209,9 +209,14 @@ function markRead(list){
   list.forEach(m=>{ m.read = true; });
   if (DEMO) store.save(db); else sb.from('hr_inbox').update({read_at:new Date().toISOString()}).in('id',ids).then(()=>{});
 }
-const savePerson = (p, v) => run(()=>{ if (p) Object.assign(p, v); else db.people.push({id:uid(), ...v}); },
-  rpc('hr_save_person',{p_email:v.email, p_name:v.name, p_job:v.job, p_hr_role:v.role==='none'? null : v.role, p_ops_role:v.ops==='none'? null : v.ops, p_venues:v.venues}), 'Saved');
-const removePerson = p => run(()=>{ db.people = db.people.filter(x=>x.id!==p.id); }, ()=>Promise.resolve({}), 'Removed');      // demo only
+const savePerson = (p, v) => run(()=>{
+    const on = v.role!=='none', row = {name:v.name, job:v.job, venues:v.venues, role: on? v.role : (p? p.role : 'employee'), active:on};
+    if (p) Object.assign(p, row); else db.people.push({id:uid(), ...row});
+  }, rpc('hr_save_person',{p_email:v.email, p_name:v.name, p_job:v.job, p_hr_role:v.role==='none'? null : v.role, p_ops_role:v.ops==='none'? null : v.ops, p_venues:v.venues}), 'Saved');
+const disablePerson = p => run(()=>{ p.active = false; }, rpc('hr_disable_person',{p_email:p.id}), 'Disabled');
+const deletePerson = p => run(()=>{
+    db.people = db.people.filter(x=>x.id!==p.id); db.shifts = db.shifts.filter(x=>x.person!==p.id); db.leave = db.leave.filter(x=>x.person!==p.id);
+  }, rpc('hr_delete_person',{p_email:p.id}), 'Deleted');
 
 /* ---------- loading from the database ---------- */
 async function loadAll(){
@@ -466,7 +471,7 @@ function personSheet(p){
   const email = h('input',{id:'pp-email',type:'email',autocomplete:'off',placeholder:'name@example.com'});
   const name = h('input',{id:'pp-name',value:p? p.name : '',placeholder:'Full name'}), job = h('input',{id:'pp-job',value:p? p.job : '',placeholder:'Job, for example Bartender'});
   const venues = pills(V().map(v=>[v.id,v.name]), p? [...p.venues] : []);
-  const role = pills((DEMO? [] : [['none','No access']]).concat(Object.entries(ROLES)), p? (hasHr? p.role : 'none') : 'employee');
+  const role = pills([['none','No access']].concat(Object.entries(ROLES)), p? (hasHr? p.role : 'none') : 'employee');
   const ops = pills([['none','No access']].concat(Object.entries(OPS)), (p && p.ops) || 'none'), err = h('div',{class:'err',hidden:true});
   sheet(p? 'Edit person' : 'Add person',
     DEMO? null : p? h('p',{class:'small muted'},p.id) : field('Email they sign in with',email),
@@ -477,8 +482,13 @@ function personSheet(p){
     field('Works at',venues), err,
     h('p',{class:'small muted'},'Employees clock in and ask for time off. Managers also correct hours and approve time off for their venues. Admins see everything.'
       +(DEMO || p? '' : ' One login works in both apps: their Operations password if they have one, otherwise they tap Create account.')),
+    p && !self? h('details',{class:'fold'}, h('summary',{},'Disable or delete'),
+      hasHr || p.ops? h('p',{class:'small muted'},'Disable: '+p.name.split(' ')[0]+' can no longer open '+(DEMO || !p.ops? 'the app' : S.opsOwner? 'either app' : 'this app (Operations access stays; only an Operations owner can remove it)')+'. Hours and time off are kept, and you can switch them back on later.') : null,
+      h('p',{class:'small muted'},'Delete: removes the person and their login for good, with all their recorded hours and time off requests. This cannot be undone.'),
+      h('div',{class:'btns'},
+        hasHr || p.ops? armed('Disable', ()=>{ closeSheet(); disablePerson(p); }) : null,
+        armed('Delete for good', ()=>{ closeSheet(); deletePerson(p); }))) : null,
     h('div',{class:'btns'},
-      DEMO && p && !self? armed('Remove', ()=>{ closeSheet(); removePerson(p); }) : null,
       h('button',{class:'btn primary',onclick:()=>{
         const em = p? p.id : email.value.trim().toLowerCase();
         if (!DEMO && !p && !/^\S+@\S+\.\S+$/.test(em)){ err.textContent = 'Add their email address.'; err.hidden = false; return; }
@@ -487,7 +497,12 @@ function personSheet(p){
         if (!DEMO && v.role==='none' && v.ops==='none' && !p){ err.textContent = 'Give them access to at least one app.'; err.hidden = false; return; }
         closeSheet(); savePerson(p, v); }},'Save')));
 }
+const byRole = (a,b) => Object.keys(ROLES).indexOf(b.role)-Object.keys(ROLES).indexOf(a.role) || a.name.localeCompare(b.name);
+const personRow = p => h('button',{class:'row',onclick:()=>personSheet(p)}, avatar(p),
+  h('span',{class:'main'}, h('b',{},p.name), h('small',{}, (p.job? p.job+' · ' : '')+(p.role==='admin' && p.active!==false? 'All venues' : p.venues.map(vName).join(', ')||'No venue'))),
+  h('span',{class:'end'}, h('span',{class:'tag'}, p.active===false? (p.ops? 'Not in Team' : 'Disabled') : ROLES[p.role]), p.ops? h('span',{class:'tag'},'Operations · '+OPS[p.ops]) : null));
 function viewAdmin(){
+  const off = db.people.filter(p=>p.active===false && !p.ops);
   const x = exportData(), E = S.exp;
   const set = (k,v) => { E[k] = v; render(); };
   const file = 'northpoint-hours-'+iso(x.a)+'-to-'+iso(addDays(x.b,-1))+'.csv';
@@ -502,15 +517,13 @@ function viewAdmin(){
         x.rows.length? h('div',{class:'tablewrap'}, h('table',{}, h('thead',{}, h('tr',{}, x.head.map(c=>h('th',{},c)))),
           h('tbody',{}, x.rows.slice(0,4).map(r=>h('tr',{}, r.map(c=>h('td',{},c))))))) : h('div',{class:'empty'},'No finished shifts in this period.'),
         h('div',{class:'btns'}, h('button',{class:'btn',disabled:!x.rows.length,onclick:()=>copyText(x.csv)}, h('span',{html:I.copy}),'Copy'),
-          h('button',{class:'btn primary',disabled:!x.rows.length,onclick:()=>saveFile(file, x.csv)}, h('span',{html:I.down}),'Download CSV')))),
+          h('button',{class:'btn primary',disabled:!x.rows.length,onclick:()=>saveFile(file, x.csv)}, h('span',{html:I.down}),'Download')))),
     h('div',{class:'block'}, h('div',{class:'sec-h'}, h('h2',{},'Tips dashboard')),
       h('div',{class:'card'}, h('div',{class:'hd'}, h('div',{class:'main'}, h('b',{},'Not connected yet')), h('span',{class:'tag pending'},'Manual')),
         h('p',{class:'q'},'For now, download the hours above and import the file into the tips dashboard. Once we know what the dashboard accepts, this can send the hours across on its own.'))),
     h('div',{class:'block'}, h('div',{class:'sec-h'}, h('h2',{},'People'), h('button',{onclick:()=>personSheet(null)},'Add person')),
-      h('div',{class:'list'}, db.people.filter(p=>p.active!==false || p.ops).sort((a,b)=>Object.keys(ROLES).indexOf(b.role)-Object.keys(ROLES).indexOf(a.role) || a.name.localeCompare(b.name)).map(p=>
-        h('button',{class:'row',onclick:()=>personSheet(p)}, avatar(p),
-          h('span',{class:'main'}, h('b',{},p.name), h('small',{}, (p.job? p.job+' · ' : '')+(p.role==='admin' && p.active!==false? 'All venues' : p.venues.map(vName).join(', ')||'No venue'))),
-          h('span',{class:'end'}, h('span',{class:'tag'}, p.active===false? 'Not in Team' : ROLES[p.role]), p.ops? h('span',{class:'tag'},'Operations · '+OPS[p.ops]) : null))))),
+      h('div',{class:'list'}, db.people.filter(p=>p.active!==false || p.ops).sort(byRole).map(personRow)),
+      off.length? h('details',{class:'fold'}, h('summary',{},'Disabled · '+off.length), h('div',{class:'list'}, off.sort(byRole).map(personRow))) : null),
     DEMO? h('button',{class:'btn',onclick:()=>{ db = seed(); store.save(db); S.me = 'p1'; toast('Demo data reset'); render(); }},'Reset the demo data') : null];
 }
 function shiftSheet(s, pid){
