@@ -258,6 +258,13 @@ async function loadAll(){
       else db.people.push({id:d.email, name:d.name||d.email, job:d.job||'', role:'employee', venues:(d.venue_ids||[]).filter(v=>known.has(v)), active:false, ops:d.ops_role});
       if (d.email===S.me) S.opsOwner = d.ops_role==='owner';
     }
+    // Which network each clock-in and clock-out came from (admins only; the database gives it to nobody else).
+    const [nt, lb] = await Promise.all([pages(()=>sb.from('hr_shift_net').select('*').gte('at',since).order('at').order('shift_id')), sb.from('hr_networks').select('net,label')]);
+    if (!nt.error && !lb.error){
+      const m = new Map(nt.data.map(n=>[n.shift_id, n]));
+      db.shifts.forEach(s=>{ s.net = m.get(s.id) || null; });
+      db.networks = lb.data;
+    }
   }
 }
 async function refresh(){
@@ -476,6 +483,44 @@ function copyText(text){
   const fallback = () => sheet('Copy the export', h('p',{class:'small muted'},'Select everything in the box and copy it.'), h('textarea',{id:'csv-out',readonly:true,style:'min-height:220px;font-size:12px',value:text}));
   if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(()=>toast('Copied'), fallback); else fallback();
 }
+/* where people clock in: a quiet, folded admin view; nothing is blocked and nobody is alerted */
+const netName = k => { const n = (db.networks||[]).find(x=>x.net===k); return n? n.label : null; };
+function clockEvents(days){
+  const since = Date.now()-days*DAY, out = [];
+  for (const s of db.shifts){
+    if (!s.net) continue;
+    if (s.net.in_net && s.in>=since) out.push({s, what:'in', at:s.in, net:s.net.in_net});
+    if (s.net.out_net && s.out && s.out>=since) out.push({s, what:'out', at:s.out, net:s.net.out_net});
+  }
+  return out.sort((a,b)=>b.at-a.at);
+}
+function netSheet(k){
+  const label = h('input',{id:'net-label',value:netName(k)||'',placeholder:'For example: Victoria Wi-Fi'});
+  sheet('Name this network', h('p',{class:'small muted num'},k),
+    field('Name',label),
+    h('p',{class:'small muted'},'Name the networks that belong to the venues, usually their Wi-Fi. A phone on mobile data shows up as a different network almost every time, so those are not worth naming. Leave the name empty to remove it.'),
+    h('button',{class:'btn primary',onclick:()=>{ closeSheet(); run(()=>{}, rpc('hr_label_network',{p_net:k, p_label:label.value.trim()}), 'Saved'); }},'Save'));
+}
+function personNetSheet(x){
+  sheet(x.p.name, h('p',{class:'small muted'}, x.off.length? 'Clock-ins and clock-outs in the last 30 days that did not come from a named network. On its own this proves nothing: mobile data looks the same as being elsewhere.' : 'Everything in the last 30 days came from a named network.'),
+    x.off.length? h('div',{class:'list'}, x.off.map(e=>h('div',{class:'row'}, h('span',{class:'main'},
+      h('b',{class:'num'}, fmtD(e.at)+' · '+fmtT(e.at)+' · clock '+e.what), h('small',{class:'num'}, vName(e.s.venue)+' · '+e.net))))) : null);
+}
+function networkFold(){
+  if (DEMO) return null;
+  const ev = clockEvents(30), named = ev.filter(e=>netName(e.net)).length;
+  const nets = [...new Set(ev.map(e=>e.net))].map(k=>{ const mine = ev.filter(e=>e.net===k); return {k, n:mine.length, people:new Set(mine.map(e=>e.s.person)).size}; }).sort((a,b)=>b.n-a.n);
+  const ppl = [...new Set(ev.map(e=>e.s.person))].map(id=>{ const mine = ev.filter(e=>e.s.person===id); return {p:person(id), n:mine.length, off:mine.filter(e=>!netName(e.net))}; }).sort((a,b)=>b.off.length-a.off.length || a.p.name.localeCompare(b.p.name));
+  return h('details',{class:'fold'}, h('summary',{},'Where people clock in'),
+    h('p',{class:'small muted'}, ev.length? 'Last 30 days: '+named+' of '+ev.length+' clock-ins and clock-outs came from a network you have named. Only admins see this, and nobody is alerted.'
+      : 'Nothing recorded yet. From now on each clock-in and clock-out notes the network it came from. Only admins see this, and nobody is alerted.'),
+    nets.length? [h('div',{class:'small muted'},'Networks'), h('div',{class:'list'}, nets.slice(0,12).map(n=>h('button',{class:'row',onclick:()=>netSheet(n.k)},
+      h('span',{class:'main'}, h('b',{}, netName(n.k) || 'Not named'), h('small',{class:'num'}, n.k+' · used '+n.n+' times by '+n.people+(n.people===1? ' person' : ' people'))),
+      h('span',{class:'tag'+(netName(n.k)? ' approved' : '')}, netName(n.k)? 'Named' : 'Name it'))))] : null,
+    ppl.length? [h('div',{class:'small muted'},'People'), h('div',{class:'list'}, ppl.map(x=>h('button',{class:'row',onclick:()=>personNetSheet(x)}, avatar(x.p),
+      h('span',{class:'main'}, h('b',{},x.p.name), h('small',{class:'num'}, x.off.length? x.off.length+' of '+x.n+' from other networks' : 'All '+x.n+' from named networks')),
+      h('span',{html:I.right.replace('<svg','<svg class="chev"')}))))] : null);
+}
 function personSheet(p){
   const self = p && p.id===S.me, hasHr = !p || p.active!==false;
   const email = h('input',{id:'pp-email',type:'email',autocomplete:'off',placeholder:'name@example.com'});
@@ -534,6 +579,7 @@ function viewAdmin(){
     h('div',{class:'block'}, h('div',{class:'sec-h'}, h('h2',{},'People'), h('button',{onclick:()=>personSheet(null)},'Add person')),
       h('div',{class:'list'}, db.people.filter(p=>p.active!==false || p.ops).sort(byRole).map(personRow)),
       off.length? h('details',{class:'fold'}, h('summary',{},'Disabled · '+off.length), h('div',{class:'list'}, off.sort(byRole).map(personRow))) : null),
+    networkFold(),
     DEMO? h('button',{class:'btn',onclick:()=>{ db = seed(); store.save(db); S.me = 'p1'; toast('Demo data reset'); render(); }},'Reset the demo data') : null];
 }
 function shiftSheet(s, pid){
@@ -554,6 +600,8 @@ function shiftSheet(s, pid){
   const need = () => { if (!reason.value.trim()){ err.textContent = 'Add a short reason. '+p.name.split(' ')[0]+' will see it.'; err.hidden = false; return false; } return true; };
   sheet((s? 'Correct shift' : 'Add a shift')+' · '+p.name, field('Venue',venue), field('Date',date),
     h('div',{class:'two'}, field('Clock in',tin), field('Clock out',tout)), hint, field('Reason',reason), err,
+    s && s.net && me().role==='admin'? h('p',{class:'small muted num'}, 'Clocked in from '+(netName(s.net.in_net) || s.net.in_net || 'an unknown network')
+      +(s.out? ', out from '+(netName(s.net.out_net) || s.net.out_net || 'an unknown network') : '')+'.') : null,
     s && s.edited && s.edited.was? h('p',{class:'small muted num'}, 'First recorded as '+fmtT(s.edited.was.in)+' – '+(s.edited.was.out? fmtT(s.edited.was.out) : 'no clock-out')+'.') : null,
     h('div',{class:'btns'},
       s? armed('Remove shift', ()=>{ if (need()){ closeSheet(); deleteShift(s, reason.value.trim()); } }) : null,
