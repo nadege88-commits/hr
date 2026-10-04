@@ -162,14 +162,34 @@ async function run(demoFn, call, ok){
 }
 const rpc = (fn, args) => () => sb.rpc(fn, args);
 const ts = t => t? new Date(t).toISOString() : null;
-function clockIn(venue){
-  if (openShift(S.me)) return;
-  return run(()=>db.shifts.push({id:uid(), person:S.me, venue, in:Date.now(), out:null, edited:null}), rpc('hr_clock_in',{p_venue:venue}), 'Clocked in at '+vName(venue));
+// One location reading at the tap, for admins to check on a map when in doubt. No tracking: nothing runs in the
+// background. Never holds up clocking: if location is off, refused or slow, the clock goes through without it.
+function hereNow(){
+  if (DEMO || !navigator.geolocation) return Promise.resolve(null);
+  return new Promise(done => {
+    const t = setTimeout(()=>done(null), 6000);
+    navigator.geolocation.getCurrentPosition(
+      p => { clearTimeout(t); done({p_lat:p.coords.latitude, p_lng:p.coords.longitude, p_acc:Math.round(p.coords.accuracy||0)}); },
+      () => { clearTimeout(t); done(null); },
+      {enableHighAccuracy:true, timeout:5500, maximumAge:60000});
+  });
 }
-function clockOut(){
-  const s = openShift(S.me); if (!s) return;
+const noLoc = {p_lat:null, p_lng:null, p_acc:null};
+let clocking = false;
+async function clockIn(venue){
+  if (openShift(S.me) || clocking) return;
+  clocking = true; render();
+  const loc = (await hereNow()) || noLoc;
+  clocking = false;
+  return run(()=>db.shifts.push({id:uid(), person:S.me, venue, in:Date.now(), out:null, edited:null}), rpc('hr_clock_in',{p_venue:venue, ...loc}), 'Clocked in at '+vName(venue));
+}
+async function clockOut(){
+  const s = openShift(S.me); if (!s || clocking) return;
+  clocking = true; render();
+  const loc = (await hereNow()) || noLoc;
+  clocking = false;
   const t = Date.now();
-  return run(()=>{ s.out = t; }, rpc('hr_clock_out',{}), 'Clocked out · '+dur(t-s.in));
+  return run(()=>{ s.out = t; }, rpc('hr_clock_out',loc), 'Clocked out · '+dur(t-s.in));
 }
 function saveShift(s, v, reason){
   return run(()=>{
@@ -329,8 +349,9 @@ function viewClock(){
     !s && p.venues.length>1 ? h('div',{class:'vpick',role:'group','aria-label':'Venue'}, p.venues.map(v=>
       h('button',{class:'vtile','aria-pressed':String(S.pickVenue===v),'aria-label':vName(v),onclick:()=>{ S.pickVenue = v; render(); }}, vLogo(v)))) : null,
     !s && p.venues.length===1 ? h('div',{class:'vtile',style:'align-self:flex-start;min-width:150px'}, vLogo(p.venues[0])) : null,
-    s ? h('button',{class:'btn big out',onclick:clockOut},'Clock out')
-      : h('button',{class:'btn big primary',disabled:!p.venues.length,onclick:()=>clockIn(S.pickVenue)},'Clock in'+(p.venues.length>1? ' at '+vName(S.pickVenue) : '')));
+    s ? h('button',{class:'btn big out',disabled:clocking,onclick:clockOut}, clocking? 'One moment…' : 'Clock out')
+      : h('button',{class:'btn big primary',disabled:!p.venues.length || clocking,onclick:()=>clockIn(S.pickVenue)}, clocking? 'One moment…' : 'Clock in'+(p.venues.length>1? ' at '+vName(S.pickVenue) : '')),
+    DEMO? null : h('p',{class:'small muted',style:'margin:0'},'Your location is noted once when you clock in or out.'));
   const ws = weekStart(now), mine = db.shifts.filter(x=>x.person===S.me);
   const perDay = Array.from({length:7}, (_,i)=> mine.filter(x=>day0(x.in)===addDays(ws,i)).reduce((t,x)=>t+sdur(x),0));
   const max = Math.max(8*HOUR, ...perDay), total = perDay.reduce((a,b)=>a+b,0);
@@ -485,6 +506,14 @@ function copyText(text){
 }
 /* where people clock in: a quiet, folded admin view; nothing is blocked and nobody is alerted */
 const netName = k => { const n = (db.networks||[]).find(x=>x.net===k); return n? n.label : null; };
+// The phone's location at that clock, as a link that opens a pin in Google Maps.
+function mapLink(s, what){
+  const n = s.net, lat = n && n[what+'_lat'], lng = n && n[what+'_lng'];
+  if (lat==null || lng==null) return null;
+  const acc = n[what+'_acc'];
+  return h('a',{class:'maplink',href:'https://www.google.com/maps/search/?api=1&query='+lat+','+lng,target:'_blank',rel:'noopener',onclick:e=>e.stopPropagation()},
+    'Map'+(acc? ' ±'+(acc>=1000? (acc/1000).toFixed(1)+' km' : Math.round(acc)+' m') : ''));
+}
 function clockEvents(days){
   const since = Date.now()-days*DAY, out = [];
   for (const s of db.shifts){
@@ -502,9 +531,10 @@ function netSheet(k){
     h('button',{class:'btn primary',onclick:()=>{ closeSheet(); run(()=>{}, rpc('hr_label_network',{p_net:k, p_label:label.value.trim()}), 'Saved'); }},'Save'));
 }
 function personNetSheet(x){
-  sheet(x.p.name, h('p',{class:'small muted'}, x.off.length? 'Clock-ins and clock-outs in the last 30 days that did not come from a named network. On its own this proves nothing: mobile data looks the same as being elsewhere.' : 'Everything in the last 30 days came from a named network.'),
+  sheet(x.p.name, h('p',{class:'small muted'}, x.off.length? 'Clock-ins and clock-outs in the last 30 days that did not come from a named network. On its own this proves nothing: mobile data looks the same as being elsewhere. Tap Map to see where the phone was.' : 'Everything in the last 30 days came from a named network.'),
     x.off.length? h('div',{class:'list'}, x.off.map(e=>h('div',{class:'row'}, h('span',{class:'main'},
-      h('b',{class:'num'}, fmtD(e.at)+' · '+fmtT(e.at)+' · clock '+e.what), h('small',{class:'num'}, vName(e.s.venue)+' · '+e.net))))) : null);
+      h('b',{class:'num'}, fmtD(e.at)+' · '+fmtT(e.at)+' · clock '+e.what), h('small',{class:'num'}, vName(e.s.venue)+' · '+e.net)),
+      mapLink(e.s, e.what) || h('small',{class:'muted'},'No location')))) : null);
 }
 function networkFold(){
   if (DEMO) return null;
@@ -600,8 +630,8 @@ function shiftSheet(s, pid){
   const need = () => { if (!reason.value.trim()){ err.textContent = 'Add a short reason. '+p.name.split(' ')[0]+' will see it.'; err.hidden = false; return false; } return true; };
   sheet((s? 'Correct shift' : 'Add a shift')+' · '+p.name, field('Venue',venue), field('Date',date),
     h('div',{class:'two'}, field('Clock in',tin), field('Clock out',tout)), hint, field('Reason',reason), err,
-    s && s.net && me().role==='admin'? h('p',{class:'small muted num'}, 'Clocked in from '+(netName(s.net.in_net) || s.net.in_net || 'an unknown network')
-      +(s.out? ', out from '+(netName(s.net.out_net) || s.net.out_net || 'an unknown network') : '')+'.') : null,
+    s && s.net && me().role==='admin'? h('p',{class:'small muted num'}, 'Clocked in from '+(netName(s.net.in_net) || s.net.in_net || 'an unknown network'), mapLink(s,'in')? [' · ', mapLink(s,'in')] : null,
+      s.out? [', out from '+(netName(s.net.out_net) || s.net.out_net || 'an unknown network'), mapLink(s,'out')? [' · ', mapLink(s,'out')] : null] : null, '.') : null,
     s && s.edited && s.edited.was? h('p',{class:'small muted num'}, 'First recorded as '+fmtT(s.edited.was.in)+' – '+(s.edited.was.out? fmtT(s.edited.was.out) : 'no clock-out')+'.') : null,
     h('div',{class:'btns'},
       s? armed('Remove shift', ()=>{ if (need()){ closeSheet(); deleteShift(s, reason.value.trim()); } }) : null,

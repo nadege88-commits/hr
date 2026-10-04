@@ -192,3 +192,5 @@ tr:last-child td{border-bottom:0}
 .fold[open]>summary::before{transform:rotate(45deg)}
 .fold[open]>summary{margin-bottom:10px}
 .fold>*+*{margin-top:10px}
+/* admin: the phone's location at a clock, opens Google Maps */
+.maplink{color:var(--accent);font-weight:700;font-size:13px;white-space:nowrap;text-decoration:none;flex:none}
