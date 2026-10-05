@@ -35,7 +35,7 @@ const I = {
   bell: svg('<path d="M6 9a6 6 0 0 1 12 0c0 6 2 7 2 7H4s2-1 2-7"/><path d="M10 20a2 2 0 0 0 4 0"/>'),
   admin: svg('<path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/>'),
   left: svg('<path d="M15 6l-6 6 6 6"/>'), right: svg('<path d="M9 6l6 6-6 6"/>'),
-  x: svg('<path d="M6 6l12 12M18 6L6 18"/>'), plus: svg('<path d="M12 5v14M5 12h14"/>'),
+  x: svg('<path d="M6 6l12 12M18 6L6 18"/>'), trash: svg('<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>'), plus: svg('<path d="M12 5v14M5 12h14"/>'),
   sun: svg('<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.500 1.500M17.500 17.500L19 19M5 19l1.500-1.500M17.500 6.500L19 5"/>'),
   moon: svg('<path d="M20 14.500A8 8 0 0 1 9.500 4a8 8 0 1 0 10.500 10.500z"/>'),
   warn: svg('<path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17.500v.01"/>'),
@@ -333,10 +333,12 @@ function listen(){
 function pullToRefresh(){
   let y0 = null, dy = 0, ind = null;
   const drop = () => { ind?.remove(); ind = null; };
-  addEventListener('touchstart', e=>{ dy = 0; y0 = S.ready && !busy() && scrollY<=0 && e.touches.length===1? e.touches[0].clientY : null; }, {passive:true});
+  let x0 = 0;
+  addEventListener('touchstart', e=>{ dy = 0; x0 = e.touches[0].clientX; y0 = S.ready && !busy() && scrollY<=0 && e.touches.length===1? e.touches[0].clientY : null; }, {passive:true});
   addEventListener('touchmove', e=>{
     if (y0===null) return;
     dy = e.touches[0].clientY - y0;
+    if (!ind && Math.abs(e.touches[0].clientX - x0) > dy){ y0 = null; return; }   // a sideways swipe, not a pull
     if (dy<=8 || scrollY>0){ drop(); return; }
     if (!ind){ ind = h('div',{class:'ptr','aria-hidden':'true',html:I.refresh}); document.body.append(ind); }
     const d = Math.min(dy, 140);
@@ -518,8 +520,43 @@ function viewInbox(){
       h('div',{class:'main'}, h('b',{},'Notifications on this phone'), h('small',{}, on? 'On. You get a notification for each new message here.' : 'Off. Messages still arrive here in the inbox.')),
       h('button',{class:'tog',role:'switch','aria-checked':String(on),'aria-label':'Notifications on this phone',onclick:()=>{ db.push[S.me] = !on; store.save(db); render(); }})),
       h('p',{class:'small muted'},'Demo: in the real app this switch turns on phone notifications, the same way as in Operations.')),
-    h('div',{class:'list'}, list.length? list.map(m=>h('button',{class:'row msg'+(m.read? ' read' : ''),onclick:()=>{ markRead([m]); go(tabs().some(t=>t[0]===m.tab)? m.tab : (m.tab==='hours'? 'team' : 'inbox'), m.tab==='hours'? 'mine' : (m.kind==='leave'? 'approve' : m.kind==='decision'? 'mine' : null)); }},
-      h('span',{class:'un'}), h('span',{class:'main'}, h('b',{},m.text), h('small',{},ago(m.at))))) : h('div',{class:'empty'},'Nothing yet. Requests, decisions and shift changes show up here.'))];
+    h('div',{class:'list'}, list.length? list.map(m=>{
+      const row = h('button',{class:'row msg'+(m.read? ' read' : ''),onclick:()=>{ if (row._swiped) return; markRead([m]); go(tabs().some(t=>t[0]===m.tab)? m.tab : (m.tab==='hours'? 'team' : 'inbox'), m.tab==='hours'? 'mine' : (m.kind==='leave'? 'approve' : m.kind==='decision'? 'mine' : null)); }},
+        h('span',{class:'un'}), h('span',{class:'main'}, h('b',{},m.text), h('small',{},ago(m.at))));
+      return swipeToDelete(row, ()=>deleteMessage(m));
+    }) : h('div',{class:'empty'},'Nothing yet. Requests, decisions and shift changes show up here.'))];
+}
+async function deleteMessage(m){
+  db.inbox = db.inbox.filter(x=>x.id!==m.id); render();
+  if (DEMO){ store.save(db); return; }
+  const {error} = await sb.from('hr_inbox').delete().eq('id', m.id);
+  if (error){ toast('Could not delete. Try again.'); refresh(); }
+}
+// Swipe a row right to left to delete it: a red Delete shows underneath; past a third of the width it goes.
+function swipeToDelete(row, onDelete){
+  const wrap = h('div',{class:'swipe'}, h('div',{class:'swipe-bg',html:I.trash+'<span>Delete</span>'}), row);
+  let x0 = null, y0 = 0, dx = 0, dir = null;
+  const slide = (x, anim) => { row.style.transition = anim? 'transform .2s ease' : 'none'; row.style.transform = x? `translateX(${x}px)` : ''; };
+  row.addEventListener('touchstart', e=>{ if (e.touches.length!==1) return; x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; dx = 0; dir = null; row._swiped = false; }, {passive:true});
+  row.addEventListener('touchmove', e=>{
+    if (x0===null) return;
+    const mx = e.touches[0].clientX - x0, my = e.touches[0].clientY - y0;
+    if (!dir){ if (Math.abs(mx)<8 && Math.abs(my)<8) return; dir = Math.abs(mx)>Math.abs(my) && mx<0 ? 'x' : 'y'; }
+    if (dir!=='x') return;
+    dx = Math.min(0, mx); row._swiped = true; slide(dx);
+  }, {passive:true});
+  const end = ()=>{
+    if (x0===null) return; x0 = null;
+    if (dir!=='x') return;
+    if (-dx > wrap.offsetWidth/3){
+      slide(-wrap.offsetWidth, true);
+      setTimeout(()=>{ wrap.style.transition = 'height .2s ease'; wrap.style.height = wrap.offsetHeight+'px'; requestAnimationFrame(()=>{ wrap.style.height = '0px'; }); }, 180);
+      setTimeout(onDelete, 400);
+    } else slide(0, true);
+    setTimeout(()=>{ row._swiped = false; }, 50);
+  };
+  row.addEventListener('touchend', end); row.addEventListener('touchcancel', ()=>{ dx = 0; end(); });
+  return wrap;
 }
 /* export */
 function exportRange(){
