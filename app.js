@@ -543,16 +543,19 @@ function swipeToDelete(row, onDelete){
     const mx = e.touches[0].clientX - x0, my = e.touches[0].clientY - y0;
     if (!dir){ if (Math.abs(mx)<8 && Math.abs(my)<8) return; dir = Math.abs(mx)>Math.abs(my) && mx<0 ? 'x' : 'y'; }
     if (dir!=='x') return;
-    dx = Math.min(0, mx); row._swiped = true; slide(dx);
+    dx = Math.min(0, mx); row._swiped = true; wrap.classList.add('on'); slide(dx);
   }, {passive:true});
   const end = ()=>{
     if (x0===null) return; x0 = null;
     if (dir!=='x') return;
     if (-dx > wrap.offsetWidth/3){
       slide(-wrap.offsetWidth, true);
-      setTimeout(()=>{ wrap.style.transition = 'height .2s ease'; wrap.style.height = wrap.offsetHeight+'px'; requestAnimationFrame(()=>{ wrap.style.height = '0px'; }); }, 180);
-      setTimeout(onDelete, 400);
-    } else slide(0, true);
+      setTimeout(()=>{   // then the gap closes smoothly and the rows below slide up
+        wrap.classList.add('gone'); wrap.style.height = wrap.offsetHeight+'px'; void wrap.offsetHeight;
+        wrap.style.transition = 'height .25s ease'; wrap.style.height = '0px';
+        setTimeout(onDelete, 270);
+      }, 200);
+    } else { slide(0, true); setTimeout(()=>wrap.classList.remove('on'), 200); }
     setTimeout(()=>{ row._swiped = false; }, 50);
   };
   row.addEventListener('touchend', end); row.addEventListener('touchcancel', ()=>{ dx = 0; end(); });

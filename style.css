@@ -161,7 +161,8 @@ tr:last-child td{border-bottom:0}
 /* inbox */
 .msg{align-items:flex-start;position:relative;background:var(--surface);touch-action:pan-y}
 .swipe{position:relative;overflow:hidden}
-.swipe-bg{position:absolute;inset:0;background:var(--bad);color:#fff;display:flex;align-items:center;justify-content:flex-end;gap:6px;padding:0 18px;font-weight:700;font-size:14px}
+.swipe-bg{position:absolute;inset:0;visibility:hidden;transition:opacity .15s;background:var(--bad);color:#fff;display:flex;align-items:center;justify-content:flex-end;gap:6px;padding:0 18px;font-weight:700;font-size:14px}
+.swipe.on .swipe-bg{visibility:visible}.swipe.gone .swipe-bg{opacity:0}
 .swipe-bg svg{width:18px;height:18px}
 .msg .un{width:8px;height:8px;border-radius:50%;background:var(--accent);margin-top:7px;flex:none}
 .msg.read .un{background:transparent}
